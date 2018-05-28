@@ -1,55 +1,98 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
+import sys, os, multiprocessing, urllib3, csv
 from PIL import Image
-from multiprocessing import Pool
-from tqdm import tqdm
-from urllib3 import PoolManager
-from urllib3.util import Retry
-import io
+from io import BytesIO
+from tqdm  import tqdm
 import json
-import os
-import sys
-import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+######################################################################################################################
+## Functions
+######################################################################################################################
 
-def download_image(info):
-    fname, url = info
-    if not os.path.exists(fname):
-        http = PoolManager(retries=Retry(connect=3, read=2, redirect=3))
-        response = http.request('GET', url)
-        image = Image.open(io.BytesIO(response.data))
-        image_rgb = image.convert('RGB')
-        image_rgb.save(fname, format='jpeg', quality=90)
+client = urllib3.PoolManager(500)
+
+def ParseData(data_file):
+
+  j = json.load(open(data_file))
+
+  annotations = {}
+
+  if 'train' in data_file or 'validation' in data_file:
+      _annotations = j['annotations']
+      for annotation in _annotations:
+        annotations[annotation['imageId']] = [int(i) for i in annotation['labelId']]
+
+  key_url_list = []
+  images = j['images']
+
+  for item in images:
+    url = item['url']
+    id_ = item['imageId']
+
+    if id_ in annotations:
+        id_ = "id_{}_labels_{}".format(id_, annotations[id_])
+    key_url_list.append((id_, url))
+
+  return key_url_list
 
 
-def parse_dataset(dataset, outdir):
-    infos = []
-    with open(dataset, 'r') as f:
-        data = json.load(f)
-        for image in data['images']:
-            url = image['url']
-            fname = os.path.join(outdir, 'image['+str(image['imageId'])+']}.jpg')
-            infos.append((fname, url))
-    return infos
+
+
+def DownloadImage(key_url):
+
+  out_dir = sys.argv[2]
+  (key, url) = key_url
+  filename = os.path.join(out_dir, '%s.jpg' % key)
+
+  if os.path.exists(filename):
+    print('Image %s already exists. Skipping download.' % filename)
+    return
+
+  try:
+    global client
+    response = client.request('GET', url)#, timeout=30)
+    image_data = response.data
+  except:
+    print('Warning: Could not download image %s from %s' % (key, url))
+    return
+
+  try:
+    pil_image = Image.open(BytesIO(image_data))
+  except:
+    print('Warning: Failed to parse image %s %s' % (key,url))
+    return
+
+  try:
+    pil_image_rgb = pil_image.convert('RGB')
+  except:
+    print('Warning: Failed to convert image %s to RGB' % key)
+    return
+
+  try:
+    pil_image_rgb.save(filename, format='JPEG', quality=90)
+  except:
+    print('Warning: Failed to save image %s' % filename)
+    return
+
+
+def Run():
+
+  if len(sys.argv) != 3:
+    print('Syntax: %s <train|validation|test.json> <output_dir/>' % sys.argv[0])
+    sys.exit(0)
+  (data_file, out_dir) = sys.argv[1:]
+
+  if not os.path.exists(out_dir):
+    os.mkdir(out_dir)
+
+  key_url_list = ParseData(data_file)
+  pool = multiprocessing.Pool(processes=12)
+
+  with tqdm(total=len(key_url_list)) as bar:
+    for _ in pool.imap_unordered(DownloadImage, key_url_list):
+      bar.update(1)
 
 
 if __name__ == '__main__':
-    if len(sys.argv) != 3:
-        print('Not enough arguments; exiting!')
-        sys.exit(1)
-
-    dataset, outdir = sys.argv[1:]
-    if not os.path.exists(outdir):
-        print('Making directory...')
-        os.makedirs(outdir)
-
-    infos = parse_dataset(dataset, outdir)
-    pool = Pool(processes=8)
-    with tqdm(total=len(infos)) as progress:
-        for _ in pool.imap_unordered(download_image, infos):
-            progress.update(1)
-
-    sys.exit(0)
+  Run()
